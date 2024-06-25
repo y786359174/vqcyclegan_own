@@ -27,7 +27,7 @@ def train(vqvaex:VQVAECYCLEGAN, vqvaey:VQVAECYCLEGAN, disG:Discriminator, disF:D
     batch_size = 1
     lr = 1e-4
     beta1 = 0.5
-    k_max = 6
+    k_max = 1
     l_w_embedding=1
     l_w_commitment=0.25
     # criterion_GAN = torch.nn.MSELoss().to(device)
@@ -61,7 +61,7 @@ def train(vqvaex:VQVAECYCLEGAN, vqvaey:VQVAECYCLEGAN, disG:Discriminator, disF:D
     # gen_params = list(vqvaex.parameters()) + list(vqvaey.parameters())
     dis_params = list(disG.parameters()) + list(disF.parameters())
 
-    dis_weight = 0.1
+    dis_weight = 0.5
     optim_gen = torch.optim.Adam([p for p in gen_params if p.requires_grad],
                                         lr, betas=(beta1, 0.999), weight_decay=0.0001)# betas 是一个优化参数，简单来说就是考虑近期的梯度信息的程度
     optim_dis = torch.optim.Adam([p for p in dis_params if p.requires_grad],
@@ -98,64 +98,21 @@ def train(vqvaex:VQVAECYCLEGAN, vqvaey:VQVAECYCLEGAN, disG:Discriminator, disF:D
         # for _ in tqdm(range(len_dataset)):
         for (x, _), (y, _) in tqdm(zip(dataloaderx, dataloadery)):
             loader_i = loader_i+1
-            # x,_  = next(datax_iter)
-            # y,_  = next(datay_iter)
             x = x.to(device)
             y = y.to(device)
-
-            if(x.shape[0]!=batch_size):
-                continue
-
-            # 训练Gen
             
             for param in disG.parameters():
                 param.requires_grad = False
             for param in disF.parameters():
                 param.requires_grad = False
-            
-            x_hat, xze, xzq = vqvaex(x)
-            l_reconstruct = mse_loss(x, x_hat)
-            l_embedding = mse_loss(xze.detach(), xzq)     # 让zq去接近ze
-            l_commitment = mse_loss(xze, xzq.detach())    # 让ze去接近zq
-            g_loss_vqvaex = l_reconstruct + \
-                l_w_embedding * l_embedding + l_w_commitment * l_commitment # 让zq多接近ze，码本多贴合真实数据
-
-            y_hat, yze, yzq = vqvaey(y)
-            l_reconstruct = mse_loss(y, y_hat)
-            l_embedding = mse_loss(yze.detach(), yzq)     # 让zq去接近ze
-            l_commitment = mse_loss(yze, yzq.detach())    # 让ze去接近zq
-            g_loss_vqvaey = l_reconstruct + \
-                l_w_embedding * l_embedding + l_w_commitment * l_commitment # 让zq多接近ze，码本多贴合真实数据
-
-            g_loss_recon = g_loss_vqvaex + g_loss_vqvaey
-
 
             xe = vqvaex.module.encode_ze(x)    if Distributed_Flag else vqvaex.encode_ze(x)
             xy = vqvaey.module.decode_ze(xe)   if Distributed_Flag else vqvaey.decode_ze(xe)
             ye = vqvaey.module.encode_ze(y)    if Distributed_Flag else vqvaey.encode_ze(y)
             yx = vqvaex.module.decode_ze(ye)   if Distributed_Flag else vqvaex.decode_ze(ye) 
-            xye = vqvaey.module.encode_ze(xy)  if Distributed_Flag else vqvaey.encode_ze(xy)
-            xyx = vqvaex.module.decode_ze(xye) if Distributed_Flag else vqvaex.decode_ze(xye)
-            yxe = vqvaex.module.encode_ze(yx)  if Distributed_Flag else vqvaex.encode_ze(yx)
-            yxy = vqvaey.module.decode_ze(yxe) if Distributed_Flag else vqvaey.decode_ze(yxe)
-            
-            # g_loss_gan = torch.tensor(0.).to(device)
-            
-            
-            g_loss_gan_G = criterion_GAN(disG(xy), label_real)
-            g_loss_gan_F = criterion_GAN(disF(yx), label_real)
-            g_loss_gan = g_loss_gan_G + g_loss_gan_F                      # woc xdm训练gen时千万记得别再傻呵呵用fake label当target了
-            g_loss_latent = criterion_Latent(xe.float(), xye.float()) + criterion_Latent(ye.float(), yxe.float())
-            g_loss_cycle = criterion_Cycle(xyx, x) + criterion_Cycle(yxy, y) 
-            g_loss = g_loss_gan*10 + g_loss_cycle*10+ g_loss_latent*1 + g_loss_recon*2
-            # g_loss = g_loss_recon*1000
-            optim_gen.zero_grad()
-            g_loss.backward()
-            optim_gen.step()
-
 
             # 训练Dis
-            if(epoch_i%k==0):
+            if(loader_i%k==0):
                 for param in disG.parameters():
                     param.requires_grad = True
                 for param in disF.parameters():
@@ -177,6 +134,42 @@ def train(vqvaex:VQVAECYCLEGAN, vqvaey:VQVAECYCLEGAN, disG:Discriminator, disF:D
                 
                 d_loss.backward()
                 optim_dis.step()
+            
+            # 训练Gen 
+            x_hat, xze, xzq = vqvaex(x)
+            l_reconstruct = mse_loss(x, x_hat)
+            l_embedding = mse_loss(xze.detach(), xzq)     # 让zq去接近ze
+            l_commitment = mse_loss(xze, xzq.detach())    # 让ze去接近zq
+            g_loss_vqvaex = l_reconstruct + \
+                l_w_embedding * l_embedding + l_w_commitment * l_commitment # 让zq多接近ze，码本多贴合真实数据
+
+            y_hat, yze, yzq = vqvaey(y)
+            l_reconstruct = mse_loss(y, y_hat)
+            l_embedding = mse_loss(yze.detach(), yzq)     # 让zq去接近ze
+            l_commitment = mse_loss(yze, yzq.detach())    # 让ze去接近zq
+            g_loss_vqvaey = l_reconstruct + \
+                l_w_embedding * l_embedding + l_w_commitment * l_commitment # 让zq多接近ze，码本多贴合真实数据
+
+            g_loss_recon = g_loss_vqvaex + g_loss_vqvaey
+            
+            xye = vqvaey.module.encode_ze(xy)  if Distributed_Flag else vqvaey.encode_ze(xy)
+            xyx = vqvaex.module.decode_ze(xye) if Distributed_Flag else vqvaex.decode_ze(xye)
+            yxe = vqvaex.module.encode_ze(yx)  if Distributed_Flag else vqvaex.encode_ze(yx)
+            yxy = vqvaey.module.decode_ze(yxe) if Distributed_Flag else vqvaey.decode_ze(yxe)
+            
+            g_loss_gan_G = criterion_GAN(disG(xy), label_real)
+            g_loss_gan_F = criterion_GAN(disF(yx), label_real)
+            g_loss_gan = g_loss_gan_G + g_loss_gan_F                      # woc xdm训练gen时千万记得别再傻呵呵用fake label当target了
+            # g_loss_gan = torch.tensor(0.).to(device)
+            g_loss_latent = criterion_Latent(xe.float(), xye.float()) + criterion_Latent(ye.float(), yxe.float())
+            g_loss_cycle = criterion_Cycle(xyx, x) + criterion_Cycle(yxy, y) 
+            g_loss = g_loss_gan*10 + g_loss_cycle*10+ g_loss_latent*1 + g_loss_recon*2
+            # g_loss = g_loss_recon*1000
+
+            optim_gen.zero_grad()
+            g_loss.backward()
+            optim_gen.step()
+
             if(loader_i%30==0 and (Distributed_Flag==False or local_rank<=0)):
                 with torch.no_grad():
                     # print(disG(xy), disF(yx))
@@ -206,7 +199,7 @@ def train(vqvaex:VQVAECYCLEGAN, vqvaey:VQVAECYCLEGAN, disG:Discriminator, disF:D
         loss_list = loss_list/len_dataset    
         toc = time.time()    
         if Distributed_Flag==False or local_rank<=0:
-            gan_weights = {'vqvaex': vqvaex.state_dict(), 'vqvaey': vqvaey.state_dict(), 'disG': disG.state_dict(), 'disF': disF.state_dict(), 'embed':embedding.state_dict()}
+            gan_weights = {'vqvaex': vqvaex.module.state_dict(), 'vqvaey': vqvaey.module.state_dict(), 'disG': disG.module.state_dict(), 'disF': disF.module.state_dict(), 'embed':embedding.module.state_dict()}
             torch.save(gan_weights, ckpt_path)
             print(f'epoch {epoch_i} g_loss: {loss_list[0].item():.4e} d_loss: {loss_list[1].item():.4e} time: {(toc - tic):.2f}s')
             print(f'g_loss_gan {loss_list[2].item():.4e} g_loss_cycle: {loss_list[3].item():.4e} g_loss_identity: {loss_list[4].item():.4e} g_loss_latent: {loss_list[5].item():.4e} g_loss_recon: {loss_list[6].item():.4e}')
@@ -214,7 +207,7 @@ def train(vqvaex:VQVAECYCLEGAN, vqvaey:VQVAECYCLEGAN, disG:Discriminator, disF:D
             if(epoch_i%1==0):
                 sample(vqvaex.module, vqvaey.module, device=device)
 
-sample_time = 866
+sample_time = 2170
 
 def sample(vqvaex:VQVAECYCLEGAN, vqvaey:VQVAECYCLEGAN, device='cuda'):
     global sample_time
@@ -270,6 +263,9 @@ save_dir = './data/face2anime64/'
 
 if __name__ == '__main__':
 
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+        
     if Distributed_Flag:
         # setup
         local_rank = int(os.environ["LOCAL_RANK"]) ## DDP   
@@ -322,20 +318,13 @@ if __name__ == '__main__':
         disF = torch.nn.SyncBatchNorm.convert_sync_batchnorm(disF).to(device)
         disF = DDP(disF, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
 
-    gan_weights = torch.load(ckpt_path)
-    vqvaex.load_state_dict(gan_weights['vqvaex'])
-    vqvaey.load_state_dict(gan_weights['vqvaey'])
-    disG.load_state_dict(gan_weights['disG'])
-    disF.load_state_dict(gan_weights['disF'])
-    embedding.state_dict(gan_weights['embed'])
-    sample(vqvaex.module, vqvaey.module, device=device)
+    # gan_weights = torch.load(ckpt_path)
+    # vqvaex.load_state_dict(gan_weights['vqvaex'])
+    # vqvaey.load_state_dict(gan_weights['vqvaey'])
+    # disG.load_state_dict(gan_weights['disG'])
+    # disF.load_state_dict(gan_weights['disF'])
+    # embedding.state_dict(gan_weights['embed'])
+    # sample(vqvaex.module, vqvaey.module, device=device)
 
     train(vqvaex, vqvaey, disG, disF, embedding, ckpt_path, device=device)
-    gan_weights = torch.load(ckpt_path)
-    vqvaex.load_state_dict(gan_weights['vqvaex'])
-    vqvaey.load_state_dict(gan_weights['vqvaey'])
-    disG.load_state_dict(gan_weights['disG'])
-    disF.load_state_dict(gan_weights['disF'])
-    embedding.state_dict(gan_weights['embed'])
 
-    sample(vqvaex.module, vqvaey.module, device=device)

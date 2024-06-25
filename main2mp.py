@@ -7,7 +7,8 @@ from tqdm import tqdm
 sys.path.append('../')
 from CycleGAN_own.dataset import get_dataloader, get_img_shape
 from xidataset import xiget_dataloader, xiget_img_shape
-from gennet import Gen2, Dis2
+from gennet import Dis2
+from vqvae.pixel_embed import PixelCNNWithEmbedding
 from CycleGAN_own.utils import *
 from vqvae.vqvae import VQVAE
 
@@ -19,10 +20,10 @@ import cv2
 import einops
 import numpy as np
 
-Distributed_Flag = True 
+Distributed_Flag = False 
 # torchrun -m --nnodes=1 --nproc_per_node=2 --master_port 29503 main2mp
 
-def train(genGei:Gen2, genFei:Gen2, vqvaex:VQVAE, vqvaey:VQVAE,  disG:Dis2, disF:Dis2, n_embedding:int, ckpt_path, device = 'cuda'):
+def train(genGei:PixelCNNWithEmbedding, genFei:PixelCNNWithEmbedding, vqvaex:VQVAE, vqvaey:VQVAE,  disG:Dis2, disF:Dis2, n_embedding:int, ckpt_path, device = 'cuda'):
     print("using: ", device)    #你问我为什么写在这？因为main里总是有各种各样的地方会改device
     n_epochs = 10000
     batch_size = 1
@@ -84,8 +85,8 @@ def train(genGei:Gen2, genFei:Gen2, vqvaex:VQVAE, vqvaey:VQVAE,  disG:Dis2, disF
 
     genGei = genGei.train()
     genFei = genFei.train()
-    vqvaex = vqvaex.train()
-    vqvaey = vqvaey.train()
+    vqvaex = vqvaex.eval()
+    vqvaey = vqvaey.eval()
     disG = disG.train()
     disF = disF.train()
     label_fake = torch.full((batch_size,1,2,2), 0.01, dtype=torch.float, device=device).detach()       # 真实图是1，虚假是0,需要注意,这里用的时候是计算loss，是小数，要用1. 和0.
@@ -121,7 +122,6 @@ def train(genGei:Gen2, genFei:Gen2, vqvaex:VQVAE, vqvaey:VQVAE,  disG:Dis2, disF
             yi = yi.to(device)
             xi = torch.squeeze(xi, dim=1)
             yi = torch.squeeze(yi, dim=1)
-
             # 训练Gen
             for param in disG.parameters():
                 param.requires_grad = False
@@ -129,15 +129,16 @@ def train(genGei:Gen2, genFei:Gen2, vqvaex:VQVAE, vqvaey:VQVAE,  disG:Dis2, disF
                 param.requires_grad = False
             # xi = vqvaex.encode(x).detach()
             # yi = vqvaey.encode(y).detach()
-            xiGyi, xiGyi_fp, xiGyi_quan = genGei(xi.float())
-            yiFxi, yiFxi_fp, yiFxi_quan = genFei(yi.float())
+            xiGyi_prob = genGei(xi)
+            yiFxi_prob = genFei(yi)
+            
             # genG_commitment = mse_loss(xiGyi_fp, xiGyi_quan.detach())    
             # genF_commitment = mse_loss(yiFxi_fp, yiFxi_quan.detach())
 
             # xy = vqvaey.decode(xiGyi.long())
             # yx = vqvaex.decode(yiFxi.long())
-            xiGyiFxi, _, _ = genFei(xiGyi)
-            yiFxiGyi, _, _ = genGei(yiFxi)
+            xiGyiFxi = genFei(xiGyi)
+            yiFxiGyi = genGei(yiFxi)
             # g_loss_gan = torch.tensor(0.).to(device)
             
             g_loss_gan_G = criterion_GAN(disG(xiGyi.float()), label_real)
@@ -205,13 +206,13 @@ def train(genGei:Gen2, genFei:Gen2, vqvaex:VQVAE, vqvaey:VQVAE,  disG:Dis2, disF
             print(f'epoch {epoch_i} g_loss: {loss_list[0].item():.4e} d_loss: {loss_list[1].item():.4e} time: {(toc - tic):.2f}s')
             print(f'g_loss_gan {loss_list[2].item():.4e} g_loss_cycle: {loss_list[3].item():.4e} g_loss_identity: {loss_list[4].item():.4e} g_loss_latent: {loss_list[5].item():.4e} g_loss_recon: {loss_list[6].item():.4e}')
             print(f'd_loss_G_real {loss_list[7].item():.4e} d_loss_G_fake: {loss_list[8].item():.4e} d_loss_F_real: {loss_list[9].item():.4e} d_loss_F_fake: {loss_list[10].item():.4e}')
-            if(epoch_i%1==0):
-                sample(genGei.module, genFei.module, vqvaex, vqvaey, device=device)
+            # if(epoch_i%1==0):
+            #     sample(genGei.module, genFei.module, vqvaex, vqvaey, device=device)
 
 
 sample_time = 0
 
-def sample(genGei:Gen2, genFei:Gen2, vqvaex:VQVAE, vqvaey:VQVAE, device='cuda'):
+def sample(genGei:PixelCNNWithEmbedding, genFei:PixelCNNWithEmbedding, vqvaex:VQVAE, vqvaey:VQVAE, device='cuda'):
     global sample_time
     sample_time += 1
     i_n = 10
@@ -256,12 +257,18 @@ def sample(genGei:Gen2, genFei:Gen2, vqvaex:VQVAE, vqvaey:VQVAE, device='cuda'):
 def weights_init_normal(m):                                    
     classname = m.__class__.__name__                        ## m作为一个形参，原则上可以传递很多的内容, 为了实现多实参传递，每一个moudle要给出自己的name. 所以这句话就是返回m的名字. 
     if classname.find("Conv") != -1:                        ## find():实现查找classname中是否含有Conv字符，没有返回-1；有返回0.
-        torch.nn.init.normal_(m.weight.data, 0.0, 0.02)     ## m.weight.data表示需要初始化的权重。nn.init.normal_():表示随机初始化采用正态分布，均值为0，标准差为0.02.
+        if hasattr(m, "weight") and m.weight is not None:
+            torch.nn.init.normal_(m.weight.data, 0.0, 0.02)     ## m.weight.data表示需要初始化的权重。nn.init.normal_():表示随机初始化采用正态分布，均值为0，标准差为0.02.
         if hasattr(m, "bias") and m.bias is not None:       ## hasattr():用于判断m是否包含对应的属性bias, 以及bias属性是否不为空.
             torch.nn.init.constant_(m.bias.data, 0.0)       ## nn.init.constant_():表示将偏差定义为常量0.
     elif classname.find("BatchNorm2d") != -1:               ## find():实现查找classname中是否含有BatchNorm2d字符，没有返回-1；有返回0.
         torch.nn.init.normal_(m.weight.data, 1.0, 0.02)     ## m.weight.data表示需要初始化的权重. nn.init.normal_():表示随机初始化采用正态分布，均值为0，标准差为0.02.
         torch.nn.init.constant_(m.bias.data, 0.0)           ## nn.init.constant_():表示将偏差定义为常量0.
+    elif classname.find("Linear") != -1:  # 添加线性层的初始化
+        torch.nn.init.normal_(m.weight.data, 0.0, 0.02)
+        if hasattr(m, "bias") and m.bias is not None:
+            torch.nn.init.constant_(m.bias.data, 0.0)
+
 
 save_dir = './data/face2anime64_2/'
 
@@ -297,8 +304,18 @@ if __name__ == '__main__':
     vqvaex = VQVAE(image_shape[0], dim = dim, n_embedding = n_embedding).to(device)
     vqvaey = VQVAE(image_shape[0], dim = dim, n_embedding = n_embedding).to(device)
     n_embedding_d = xiget_img_shape()
-    genGei = Gen2(n_embedding_d, 5, n_embedding).to(device)
-    genFei = Gen2(n_embedding_d, 5, n_embedding).to(device)
+    genGei = PixelCNNWithEmbedding(   n_blocks=15,
+                                        p = 384,
+                                        linear_dim = 256,
+                                        bn = True,
+                                        color_level = n_embedding).to(device)
+    genFei = PixelCNNWithEmbedding(   n_blocks=15,
+                                        p = 384,
+                                        linear_dim = 256,
+                                        bn = True,
+                                        color_level = n_embedding).to(device)
+    # genGei = Gen2(n_embedding_d, 5, n_embedding).to(device)
+    # genFei = Gen2(n_embedding_d, 5, n_embedding).to(device)
     disG = Dis2(n_embedding_d).to(device)
     disF = Dis2(n_embedding_d).to(device)
     genGei.apply(weights_init_normal)
