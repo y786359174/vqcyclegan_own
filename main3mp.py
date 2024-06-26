@@ -27,10 +27,10 @@ Distributed_Flag = True
 # torchrun -m --nnodes=1 --nproc_per_node=2 --master_port 29504 main3mp
 
 # def train(genGe: Gen3, genFe: Gen3, vqvaex:VQVAE, vqvaey:VQVAE, disG:Discriminator, disF:Discriminator, embedding:int, ckpt_path, device = 'cuda'):
-def train(genGe: Gen3, genFe: Gen3, vqvaex:VQVAE, vqvaey:VQVAE, disG:Dis2, disF:Dis2, embedding:int, ckpt_path, device = 'cuda'):
+def train(genGe: Gen3, genFe: Gen3, vqvaex:VQVAE, vqvaey:VQVAE, disG:Dis2, disF:Dis2, local_rank:int, ckpt_path, device = 'cuda'):
     print("using: ", device)    #你问我为什么写在这？因为main里总是有各种各样的地方会改device
     n_epochs = 10000
-    batch_size = 1
+    batch_size = 2
     lr = 1e-5
     beta1 = 0.5
     k_max = 5
@@ -115,6 +115,8 @@ def train(genGe: Gen3, genFe: Gen3, vqvaex:VQVAE, vqvaey:VQVAE, disG:Dis2, disF:
             y = y.to(device)
             xe = vqvaex.module.encoder(x) if Distributed_Flag else vqvaex.encoder(x)
             ye = vqvaey.module.encoder(y) if Distributed_Flag else vqvaey.encoder(y)
+            xq = vqvaex.module.encode_ze2zq(xe) if Distributed_Flag else vqvaex.encode_ze2zq(xe)
+            yq = vqvaey.module.encode_ze2zq(ye) if Distributed_Flag else vqvaey.encode_ze2zq(ye)
             xeGye = genGe(xe)
             yeFxe = genFe(ye)
             xy = vqvaey.module.decoder(xeGye) if Distributed_Flag else vqvaey.decoder(xeGye)
@@ -132,18 +134,18 @@ def train(genGe: Gen3, genFe: Gen3, vqvaex:VQVAE, vqvaey:VQVAE, disG:Dis2, disF:
                     param.requires_grad = True
                 optim_dis.zero_grad()
 
-                # xy_ = xy_buffer.push_and_pop(xy).to(device).detach()
-                # yx_ = yx_buffer.push_and_pop(yx).to(device).detach()
-                # dgr = disG(y)
-                # dgf = disG(xy_)
-                # dfr = disF(x)
-                # dff = disF(yx_)
-                xeGye_ = xy_buffer.push_and_pop(xeGye).to(device).detach()
-                yeFxe_ = yx_buffer.push_and_pop(yeFxe).to(device).detach()
-                dgr = disG(ye)
-                dgf = disG(xeGye_)
-                dfr = disF(xe)
-                dff = disF(yeFxe_)
+                xy_ = xy_buffer.push_and_pop(xy).to(device).detach()
+                yx_ = yx_buffer.push_and_pop(yx).to(device).detach()
+                dgr = disG(y)
+                dgf = disG(xy_)
+                dfr = disF(x)
+                dff = disF(yx_)
+                # xeGye_ = xy_buffer.push_and_pop(xeGye).to(device).detach()
+                # yeFxe_ = yx_buffer.push_and_pop(yeFxe).to(device).detach()
+                # dgr = disG(ye)
+                # dgf = disG(xeGye_)
+                # dfr = disF(xe)
+                # dff = disF(yeFxe_)
                 
                 if not wgan_flag:
                     d_loss_G_real = criterion_GAN(dgr, label_real)
@@ -172,20 +174,24 @@ def train(genGe: Gen3, genFe: Gen3, vqvaex:VQVAE, vqvaey:VQVAE, disG:Dis2, disF:
                 param.requires_grad = False
             # g_loss_gan = torch.tensor(0.).to(device)
 
-
+            xe_commitment = mse_loss(xe, xq.detach())
+            ye_commitment = mse_loss(ye, yq.detach())
+            g_loss_commitment = xe_commitment + ye_commitment
             if not wgan_flag:
-                # g_loss_gan_G = criterion_GAN(disG(xy), label_real)
-                # g_loss_gan_F = criterion_GAN(disF(yx), label_real)
-                g_loss_gan_G = criterion_GAN(disG(xeGye), label_real)
-                g_loss_gan_F = criterion_GAN(disF(yeFxe), label_real)
+                g_loss_gan_G = criterion_GAN(disG(xy), label_real)
+                g_loss_gan_F = criterion_GAN(disF(yx), label_real)
+                # g_loss_gan_G = criterion_GAN(disG(xeGye), label_real)
+                # g_loss_gan_F = criterion_GAN(disF(yeFxe), label_real)
                 g_loss_gan = g_loss_gan_G + g_loss_gan_F                      # woc xdm训练gen时千万记得别再傻呵呵用fake label当target了
             else:
-                g_loss_gan_G = -torch.mean(disG(xeGye))
-                g_loss_gan_F = -torch.mean(disF(yeFxe)) 
+                g_loss_gan_G = -torch.mean(disG(xy))
+                g_loss_gan_F = -torch.mean(disF(yx)) 
+                # g_loss_gan_G = -torch.mean(disG(xeGye))
+                # g_loss_gan_F = -torch.mean(disF(yeFxe)) 
                 g_loss_gan = g_loss_gan_G + g_loss_gan_F
             # g_loss_latent = criterion_Latent(xe.float(), xye.float()) + criterion_Latent(ye.float(), yxe.float())
             g_loss_cycle = criterion_Cycle(xe, xeGyeFxe) + criterion_Cycle(ye, yeFxeGye) 
-            g_loss = g_loss_gan*1 + g_loss_cycle*0.01
+            g_loss = g_loss_gan*1 + g_loss_cycle*0.01 + g_loss_commitment*0.1
             
             # g_loss = g_loss_recon*1000
             optim_gen.zero_grad()
@@ -220,13 +226,15 @@ def train(genGe: Gen3, genFe: Gen3, vqvaex:VQVAE, vqvaey:VQVAE, disG:Dis2, disF:
             # d_loss_G_fake = torch.tensor(0.).to(device)
             # d_loss_F_real = torch.tensor(0.).to(device)
             # d_loss_F_fake = torch.tensor(0.).to(device)
-            loss_list += torch.stack([g_loss, d_loss, g_loss_gan, g_loss_cycle, torch.tensor(0.).to(device), torch.tensor(0.).to(device), torch.tensor(0.).to(device), d_loss_G_real, torch.tensor(0.).to(device), d_loss_F_real, torch.tensor(0.).to(device)])  #把列表转换成tensor
+            loss_list += torch.stack([g_loss, d_loss, g_loss_gan, g_loss_cycle, g_loss_commitment, torch.tensor(0.).to(device), torch.tensor(0.).to(device), d_loss_G_real, torch.tensor(0.).to(device), d_loss_F_real, torch.tensor(0.).to(device)])  #把列表转换成tensor
             if Distributed_Flag==False or local_rank<=0:
                 step = epoch_i * len_dataset/2 + loader_i
                 if(step%180==0):
-                    writer.add_scalars('g_loss_gan', {'G': g_loss_gan_G, 'F': g_loss_gan_F}, int(step/180))
-                    writer.add_scalar('g_loss_cycle', g_loss_cycle, int(step/180))
-                    writer.add_scalars('d_loss_wgan', {'G': d_loss_G_real, 'F': d_loss_F_real}, int(step/180))
+                    step = int(step/180)
+                    writer.add_scalars('g_loss_gan', {'G': g_loss_gan_G, 'F': g_loss_gan_F}, step)
+                    writer.add_scalar('g_loss_cycle', g_loss_cycle, step)
+                    writer.add_scalar('g_loss_commitment', g_loss_commitment, step)
+                    writer.add_scalars('d_loss_wgan', {'G': d_loss_G_real, 'F': d_loss_F_real}, step)
             
             
             
@@ -238,7 +246,7 @@ def train(genGe: Gen3, genFe: Gen3, vqvaex:VQVAE, vqvaey:VQVAE, disG:Dis2, disF:
             gan_weights = {'genGe': genGe.module.state_dict(), 'genFe': genFe.module.state_dict(), 'disG': disG.module.state_dict(), 'disF': disF.module.state_dict()}
             torch.save(gan_weights, ckpt_path)
             print(f'epoch {epoch_i} g_loss: {loss_list[0].item():.4e} d_loss: {loss_list[1].item():.4e} time: {(toc - tic):.2f}s')
-            print(f'g_loss_gan {loss_list[2].item():.4e} g_loss_cycle: {loss_list[3].item():.4e} g_loss_identity: {loss_list[4].item():.4e} g_loss_latent: {loss_list[5].item():.4e} g_loss_recon: {loss_list[6].item():.4e}')
+            print(f'g_loss_gan {loss_list[2].item():.4e} g_loss_cycle: {loss_list[3].item():.4e} g_loss_commitment: {loss_list[4].item():.4e} g_loss_latent: {loss_list[5].item():.4e} g_loss_recon: {loss_list[6].item():.4e}')
             print(f'd_loss_G_real {loss_list[7].item():.4e} d_loss_G_fake: {loss_list[8].item():.4e} d_loss_F_real: {loss_list[9].item():.4e} d_loss_F_fake: {loss_list[10].item():.4e}')
             if(epoch_i%1==0):
                 sample(genGe.module, genFe.module, vqvaex.module, vqvaey.module, device=device)
@@ -247,9 +255,12 @@ def train(genGe: Gen3, genFe: Gen3, vqvaex:VQVAE, vqvaey:VQVAE, disG:Dis2, disF:
 def Write_tensorboard(tag, named_param, step):
     if(step%180==0):
         # 记录梯度信息
+        step = int(step/180)
         for name, param in named_param:
-            writer.add_histogram(tag + '/grad/'+name, param.grad, int(step/180))
-            writer.add_histogram(tag + '/param/'+name, param, int(step/180))
+            writer.add_histogram(tag + '/grad/'+name, param.grad, step)
+            writer.add_histogram(tag + '/param/'+name, param, step)
+            # if('model.10.weight' in name):
+            #     print(param.grad)
 
 sample_time = 0
 
@@ -349,8 +360,11 @@ if __name__ == '__main__':
     genFe = Gen3(dim, 11).to(device)
     # disG = Discriminator(image_shape).to(device)
     # disF = Discriminator(image_shape).to(device)
-    disG = Dis2([dim,16,16]).to(device)
-    disF = Dis2([dim,16,16]).to(device)
+    # disG = Dis2([dim,16,16]).to(device)
+    # disF = Dis2([dim,16,16]).to(device)
+    disG = Dis2(image_shape).to(device)
+    disF = Dis2(image_shape).to(device)
+    # print(disG)
     disG.apply(weights_init_normal)
     disF.apply(weights_init_normal)
     genGe.apply(weights_init_normal)
@@ -383,5 +397,5 @@ if __name__ == '__main__':
         genFe = DDP(genFe, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
     
 
-    train(genGe, genFe, vqvaex, vqvaey, disG, disF ,n_embedding, ckpt_path, device=device)
+    train(genGe, genFe, vqvaex, vqvaey, disG, disF ,local_rank, ckpt_path, device=device)
 

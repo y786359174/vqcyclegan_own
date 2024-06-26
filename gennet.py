@@ -48,25 +48,35 @@ class Dis2(nn.Module):
 
         def discriminator_block(in_filters, out_filters, normalize=True):           ## 鉴别器块儿
             """Returns downsampling layers of each discriminator block"""
-            layers = [nn.Conv2d(in_filters, out_filters, 4, stride=2, padding=1)]   ## layer += [conv + norm + relu]    
+            layers = []
+            conv = nn.Conv2d(in_filters, out_filters, 4, stride=2, padding=1)    ## layer += [conv + norm + relu]    
             if normalize:                                                           ## 每次卷积尺寸会缩小一半，共卷积了4次
                 layers.append(nn.InstanceNorm2d(out_filters))
+                layers.append(conv)
+                # layers.append(nn.utils.spectral_norm(conv))
+            else:
+                layers.append(conv)
+
             layers.append(nn.LeakyReLU(0.2, inplace=True))
             return layers
 
         self.model = nn.Sequential(                                                 
+            # *discriminator_block(channels, 64, normalize=False),        ## layer += [conv(3, 64) + relu]
+            # nn.Conv2d(64, 64, 3, padding=1),                          ##
+            # nn.Conv2d(64, 64, 3, padding=1),                          ##
+            # *discriminator_block(64, 128),                              ## layer += [conv(64, 128) + norm + relu]           # 使用谱归一化
+            # nn.Conv2d(128, 128, 3, padding=1),                          ##
+            # nn.Conv2d(128, 128, 3, padding=1),                          ##
+            
             *discriminator_block(channels, 64, normalize=False),        ## layer += [conv(3, 64) + relu]
-            nn.Conv2d(64, 64, 4, padding=1),                          ##
-            nn.Conv2d(64, 64, 4, padding=1),                          ##
-            *discriminator_block(64, 128),                              ## layer += [conv(64, 128) + norm + relu]
-            nn.Conv2d(128, 128, 4, padding=1),                          ##
-            nn.Conv2d(128, 128, 4, padding=1),                          ##
-            # *discriminator_block(128, 256),                             ## layer += [conv(128, 256) + norm + relu]
-            # *discriminator_block(256, 512),                             ## layer += [conv(256, 512) + norm + relu]
-            nn.ZeroPad2d((1, 0, 1, 0)),                                 ## layer += [pad]
+            *discriminator_block(64, 128),                              ## layer += [conv(64, 128) + norm + relu]           # 使用谱归一化
+            *discriminator_block(128, 256),                             ## layer += [conv(128, 256) + norm + relu]
+            *discriminator_block(256, 512),                             ## layer += [conv(256, 512) + norm + relu]
+            nn.Conv2d(512, 512, 3, padding=1),                          ##
+            # nn.ZeroPad2d((1, 0, 1, 0)),                                 ## layer += [pad]
             # nn.Conv2d(512, 512, 4, padding=1),                          ##
-            # nn.Conv2d(256, 1, 4, padding=1),                             ## layer += [conv(512, 1)]
-            *discriminator_block(128, 1, normalize=False)
+            nn.Conv2d(512, 1, 3),                                       ## layer += [conv(512, 1)]                   # 最后一层  不能用pad，不然梯度会消失 
+            # *discriminator_block(128, 1, normalize=False)
         )
         if not wgan_flag:
             self.net3 = nn.Sequential(
@@ -79,4 +89,6 @@ class Dis2(nn.Module):
     def forward(self, x):
         # x = torch.unsqueeze(x, dim=1)
         # x = super().forward(x)
-        return self.net3(self.model(x))
+        x = self.net3(self.model(x))
+        # print(x.shape)
+        return x
